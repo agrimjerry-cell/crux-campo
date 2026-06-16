@@ -161,7 +161,7 @@ input.file-in{display:none}
   </div>
   <div class="fld">
     <label class="lbl" for="correo">Correo electrónico <span class="req">*</span></label>
-    <input type="email" id="correo" placeholder="tu@correo.com" autocomplete="email">
+    <input type="text" inputmode="email" id="correo" placeholder="tu@correo.com" autocomplete="email" spellcheck="false" autocorrect="off" autocapitalize="none">
     <div class="err" id="err-correo">Ingresa un correo válido.</div>
   </div>
   <div class="nav">
@@ -595,8 +595,17 @@ function validate(sec){
     if(arr.length===0){showE(eid);ok=false}else hideE(eid);
   }
   if(sec===1){
-    var v=document.getElementById('correo').value.trim();
-    if(!v||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)){showE('err-correo');ok=false}else hideE('err-correo');
+    // Lectura robusta: funciona con autocomplete de cualquier navegador/SO
+    // Leemos directamente el nodo del DOM sin depender de eventos
+    var el=document.getElementById('correo');
+    var v=el.value;
+    // Algunos navegadores solo exponen el valor autocompletado via defaultValue
+    if(!v && el.defaultValue) v=el.defaultValue;
+    v=(v||'').trim();
+    // Validacion tolerante: solo necesita @ con algo antes y un punto despues
+    var atPos=v.indexOf('@');
+    var valid=(atPos>0 && v.indexOf('.',atPos)>atPos+1 && v.length>4);
+    if(!valid){showE('err-correo');ok=false}else hideE('err-correo');
   }
   if(sec===2){req('cliente','err-cliente');req('jefe','err-jefe');
     if(!gv('fecha-lev')&&!gv('hora-lev')){showE('err-fecha');ok=false}else hideE('err-fecha');
@@ -613,7 +622,7 @@ function validate(sec){
 }
 
 // ── URL del Apps Script desplegado ──────────────────────────
-var SCRIPT_URL = https://script.google.com/macros/s/AKfycbw8Vjlf24J2yRiT36tU1dkGD0vE9Oieh4jCrFo8ewvFVRP9xGvkjrugo5VGABv3LJo/exec";
+var SCRIPT_URL = "PEGA_AQUI_TU_APPS_SCRIPT_URL";
 
 // ── OFFLINE / COLA ───────────────────────────────────────────
 var DB_NAME    = 'crux_queue';
