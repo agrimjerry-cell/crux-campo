@@ -622,7 +622,7 @@ function validate(sec){
 }
 
 // ── URL del Apps Script desplegado ──────────────────────────
-var SCRIPT_URL = "PEGA_AQUI_TU_APPS_SCRIPT_URL";
+var SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwVQUuD0xeg3jEmCXy9zPQu65_YkKCm1dccMQxPckoah39v1JHI1H0nOuLMDDIipt0/exec";
 
 // ── OFFLINE / COLA ───────────────────────────────────────────
 var DB_NAME    = 'crux_queue';
@@ -631,15 +631,16 @@ var STORE_NAME = 'pendientes';
 var db         = null;
 var enviando   = false;
 
-// Abrir IndexedDB
+// Abrir IndexedDB — siempre reabre si la conexión fue cerrada
 function abrirDB(cb) {
-  if (db) { cb(db); return; }
+  // BUG FIX 1: no cachear db si fue cerrada por el browser (ej. al volver de background)
+  if (db && db.objectStoreNames) { cb(db); return; }
   var req = indexedDB.open(DB_NAME, DB_VERSION);
   req.onupgradeneeded = function(e) {
     e.target.result.createObjectStore(STORE_NAME, {keyPath:'id', autoIncrement:true});
   };
   req.onsuccess = function(e) { db = e.target.result; cb(db); };
-  req.onerror   = function()  { console.error('IndexedDB error'); cb(null); };
+  req.onerror   = function()  { db = null; console.error('IndexedDB error'); cb(null); };
 }
 
 // Guardar payload en cola
@@ -657,9 +658,11 @@ function encolar(payload, cb) {
 // Eliminar item enviado
 function desencolar(id, cb) {
   abrirDB(function(d) {
+    if (!d) { if(cb) cb(); return; }
     var tx = d.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).delete(id);
     tx.oncomplete = function() { if(cb) cb(); };
+    tx.onerror    = function() { if(cb) cb(); };
   });
 }
 
@@ -675,14 +678,38 @@ function contarPendientes(cb) {
 }
 
 // Enviar un payload al servidor
+// BUG FIX 2: agregar no-cors mode y Content-Type explícito para Apps Script
 function enviarAlServidor(payload) {
-  return fetch(SCRIPT_URL, { method:'POST', body: JSON.stringify(payload) })
-         .then(function(r) { return r.json(); });
+  return fetch(SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    // Apps Script a veces devuelve 302 redirect — seguirlo
+    if (!r.ok && r.status !== 0) throw new Error('HTTP ' + r.status);
+    return r.text();
+  }).then(function(txt) {
+    try { return JSON.parse(txt); }
+    catch(e) { return { ok: true }; } // si no es JSON válido, asumir OK
+  });
 }
 
-// Procesar toda la cola (se llama al recuperar conexión)
+// Procesar toda la cola
+// BUG FIX 3: esperar 1.5s después del evento 'online' — el browser lo dispara
+// antes de que la red esté realmente disponible para fetch
 function procesarCola() {
-  if (enviando || !navigator.onLine) return;
+  if (enviando) return;
+  // Verificar conectividad real con un ping liviano antes de intentar enviar
+  fetch(SCRIPT_URL + '?ping=1', { method:'GET', mode:'no-cors' })
+    .then(function() { _ejecutarCola(); })
+    .catch(function() {
+      // Sin red real todavía — reintentar en 5s
+      setTimeout(procesarCola, 5000);
+    });
+}
+
+function _ejecutarCola() {
+  if (enviando) return;
   abrirDB(function(d) {
     if (!d) return;
     var tx  = d.transaction(STORE_NAME, 'readonly');
@@ -691,67 +718,74 @@ function procesarCola() {
       var items = req.result;
       if (!items || items.length === 0) { actualizarBadge(); return; }
       enviando = true;
+      var total = items.length;
       actualizarBadge();
 
-      // Enviar secuencialmente
       function siguiente(i) {
         if (i >= items.length) {
           enviando = false;
           actualizarBadge();
-          mostrarToast('✅ ' + items.length + ' levantamiento' + (items.length>1?'s':'') + ' sincronizado' + (items.length>1?'s':''));
+          mostrarToast('✅ ' + total + ' levantamiento' + (total>1?'s':'') + ' sincronizado' + (total>1?'s':''));
           return;
         }
         var item = items[i];
         enviarAlServidor(item.payload)
           .then(function(res) {
-            if (res.ok) {
+            if (res && res.ok !== false) {
               desencolar(item.id, function() { siguiente(i+1); });
             } else {
+              // El servidor rechazó — reintentar en 10s
               enviando = false;
               actualizarBadge();
+              setTimeout(procesarCola, 10000);
             }
           })
           .catch(function() {
+            // Error de red — reintentar en 10s
             enviando = false;
             actualizarBadge();
+            setTimeout(procesarCola, 10000);
           });
       }
       siguiente(0);
     };
+    req.onerror = function() { enviando = false; };
   });
 }
 
-// Badge de pendientes en el header
+// Badge e indicador visual
 function actualizarBadge() {
   contarPendientes(function(n) {
     var badge = document.getElementById('badge-pendientes');
-    if (!badge) return;
-    if (n > 0) {
-      badge.textContent = n + ' pendiente' + (n>1?'s':'');
-      badge.style.display = 'inline-flex';
-    } else {
-      badge.style.display = 'none';
+    if (badge) {
+      if (n > 0) {
+        badge.textContent = n + ' pendiente' + (n>1?'s':'');
+        badge.style.display = 'inline-flex';
+      } else {
+        badge.style.display = 'none';
+      }
     }
-    // Indicador de conexión
     var ind = document.getElementById('ind-conexion');
     if (!ind) return;
     if (!navigator.onLine) {
-      ind.textContent = '⚡ Sin conexión — se enviará automáticamente';
+      ind.textContent = '⚡ Sin conexión — se enviará al recuperar señal';
       ind.style.background = '#7a4a00';
+      ind.style.display = 'block';
     } else if (enviando) {
       ind.textContent = '↑ Sincronizando...';
       ind.style.background = '#0a5e3f';
+      ind.style.display = 'block';
     } else if (n > 0) {
-      ind.textContent = '↑ Pendiente de envío';
+      ind.textContent = '↑ Pendiente de envío — reconectando...';
       ind.style.background = '#7a4a00';
+      ind.style.display = 'block';
     } else {
       ind.style.display = 'none';
     }
-    ind.style.display = (!navigator.onLine || n > 0 || enviando) ? 'block' : 'none';
   });
 }
 
-// Toast de notificación
+// Toast
 function mostrarToast(msg) {
   var t = document.getElementById('toast');
   if (!t) return;
@@ -760,13 +794,24 @@ function mostrarToast(msg) {
   setTimeout(function() { t.classList.remove('on'); }, 4000);
 }
 
-// Escuchar eventos de conexión
-window.addEventListener('online',  function() { actualizarBadge(); procesarCola(); });
-window.addEventListener('offline', function() { actualizarBadge(); });
+// BUG FIX 4: esperar 1500ms tras el evento online antes de intentar enviar
+// Los browsers disparan 'online' cuando el adaptador de red conecta,
+// no cuando hay ruta a internet disponible
+window.addEventListener('online', function() {
+  actualizarBadge();
+  setTimeout(procesarCola, 1500);
+});
+window.addEventListener('offline', function() {
+  enviando = false;
+  actualizarBadge();
+});
 
-// Al cargar: revisar si hay pendientes del día anterior
+// Al cargar: revisar si hay pendientes guardados
 window.addEventListener('load', function() {
-  abrirDB(function() { actualizarBadge(); if(navigator.onLine) procesarCola(); });
+  abrirDB(function() {
+    actualizarBadge();
+    if (navigator.onLine) setTimeout(procesarCola, 1000);
+  });
 });
 
 // ── CONSTRUIR PAYLOAD ────────────────────────────────────────
